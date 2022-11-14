@@ -1,0 +1,221 @@
+---
+title: "METABRIC-Analyses in Qing et al. 2022, npj Breast Cancer, PMID: 36344517"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Validation analyses in METABRIC cohort
+
+## Preparations
+
+Set up libraries and themes:
+
+```{r}
+datapath <- "./data/"
+
+library(genefu)
+library(data.table)
+library(dplyr)
+library(ggplot2)
+th = theme_bw() + theme(
+  panel.border = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  axis.line = element_line(colour = "black")
+) + theme(
+  legend.position = 'none',
+  axis.text.x = element_text(colour = "black", size = 12),
+  axis.text.y = element_text(
+    colour = "black",
+    size = 12,
+    hjust = 0.95
+  ),
+  axis.ticks = element_blank(),
+  plot.title = element_text(hjust = 0.5, face = "bold"),
+  axis.title = element_text(size = 12, face = "bold")
+) + theme(
+  strip.placement = "outside",
+  plot.title = element_text(hjust = 0.5),
+  strip.text.x = element_text(size = 12),
+  strip.text.y = element_text(angle = 0, size = 10, face = "italic"),
+  panel.spacing = unit(0.1, "lines"),
+  strip.background = element_rect(fill = "#EEEEEE", color = "#FFFFFF")
+)
+```
+
+## Load signatures of gene names:
+```{r}
+signature <- read.delim(paste0(datapath,"signatures.txt"), h=T)
+sig_lists=list()
+for(i in 1:dim(signature)[1]){
+  sig_lists[as.character(signature$Short[i])]=list(
+    as.character(strsplit(gsub(" ","",signature$Genes[i]),split=",")[[1]]))
+}
+```
+
+
+## Import METABRIC expression data and clinical information
+24368 genes in rows,  1980 samples in columns, first two columns: Hugo_Symbol and Entrez_Gene_Id.
+
+```{r}
+mb.expr <- read.delim("./data/data_expression.txt",h=T)
+# Matrix from metabric expression data
+mat.all <- as.matrix(mb.expr[,-(1:2)])
+rownames(mat.all) <- mb.expr[,1]
+anno <- as.matrix(mb.expr[,1:2])
+colnames(anno)[2] <- "EntrezGene.ID"
+
+# Read metabric clinical data file skipping first 5 rows with comments on variables
+mb.clin <- read.delim("./data/data_clinical.txt",h=T, skip=5)
+# adjust SAMPLE_ID to altered colnames: SAMPLE_ID2
+mb.clin$SAMPLE_ID2 <- gsub("-", ".", mb.clin$SAMPLE_ID)
+```
+
+## Selection of ER positive tumors:
+
+Select ER positive tumors using the "ThreeGene model" of Haibe-Kains, and restrict to those samples with IHC for ER
+```{r}
+clin.erp <- mb.clin[mb.clin$THREEGENE %in% c("ER+/HER2- High Prolif", "ER+/HER2- Low Prolif"), ]
+clin.erp <- na.omit(clin.erp[clin.erp$ER_IHC=="pos", ])
+```
+
+Select expression data of ER positive tumors
+```{r}
+mat.erp <- mat.all[ , colnames(mat.all) %in% clin.erp$SAMPLE_ID2]
+```
+
+## Determine Recurrence Score
+We use an adapted oncotypedx function from the genefu package leaving out the gene BAG1, which is not available in METABRIC expression data.
+```{r}
+source("./functions/oncotypedx2_withoutBAG1.R")
+require(genefu)
+data(sig.oncotypedx)
+sig.oncotypedx = sig.oncotypedx[sig.oncotypedx$symbol!="BAG1",]
+rs.mb.erp <- oncotypedx2(data= t(mat.erp), annot= anno, do.mapping=FALSE, verbose=TRUE)
+# add RS to clinical data
+clin.erp <- cbind(clin.erp, rs.mb.erp$score[clin.erp$SAMPLE_ID2])
+colnames(clin.erp)[ncol(clin.erp)] <- "rs.score"
+```
+
+### Exclude high oncotypedx score samples
+We exclude those 20% of samples with highest oncotypedx scoring:
+```{r}
+# Select a subset with rs.score < 80%-Quantile 
+clin.erp.lowint <- subset(clin.erp, subset= rs.score < as.numeric(quantile(rs.score, probs=0.8)))
+```
+
+
+## Analysis of Metabric cohort ERpos Low/Interm RS
+
+```{r}
+clin <- clin.erp.lowint
+rownames(clin) <- clin$SAMPLE_ID2
+mat <- mat.erp[,colnames(mat.erp)%in%clin$SAMPLE_ID2]
+```
+
+### Select young and old sample groups
+```{r}
+clin$type <- NA
+clin$type[clin$AGE_AT_DIAGNOSIS>=55] <- "old"
+clin$type[clin$AGE_AT_DIAGNOSIS<=50] <- "young"
+clin$type <- as.factor(clin$type)
+clin <- clin[!is.na(clin$type),]
+clin <- clin[order(rownames(clin)),]
+mat <- mat[,colnames(mat) %in% rownames(clin)]
+mat <- mat[,order(colnames(mat))]
+```
+
+### Estimate expression signatures
+
+```{r}
+mat_signature=NULL
+for(sig in names(sig_lists)){
+  score=apply(mat[which(rownames(mat)%in%sig_lists[[sig]]),],2,mean,na.rm=TRUE)
+  mat_signature=rbind(mat_signature,score)
+}
+rownames(mat_signature) <- names(sig_lists)
+#zscore normalized signatures
+mat_signature_zscore=as.data.frame(apply(mat_signature,1,function(x)(x-mean(x))/sd(x)),na.rm=TRUE)
+mat_signature_zscore=cbind(rownames(mat_signature_zscore), mat_signature_zscore)
+colnames(mat_signature_zscore)[1] <- "SAMPLE_ID2"
+finalMat=merge(clin,mat_signature_zscore,by="SAMPLE_ID2")
+```
+
+
+### Scatter plots for correlation between signatures in Suppl.Fig.4, METABRIC cohort:
+
+```{r}
+library(psych)
+pairs.panels(finalMat%>%dplyr::select("MKS","TIS","TCell","BCell","DendriticCell","MastCell","ERS","ERS_luminal","ERS_Pos_Symmans","ERS_Neg_Symmans")%>%mutate_all(~as.numeric(as.matrix(.))), 
+             method = "pearson", # correlation method
+             hist.col = "#00AFBB",
+             density = TRUE,  # show density plots
+             ellipses = TRUE, # show correlation ellipses
+             cex=1
+)
+```
+
+### Comparison of signatures in young vs old by Mann-Whitney test (Table 2, METABRIC Cohort)
+
+```{r}
+ttMW=NULL
+for(s in rownames(mat_signature)){
+  submat=finalMat[,c("type",s)]
+  submat[,s]=as.numeric(as.matrix(submat[,s]))
+  
+  pvalue=wilcox.test(submat[submat$type=="young",s],submat[submat$type=="old",s])$p.value
+  tmpmean=tapply(submat[,s],submat$type,mean)
+  ttMW=rbind(ttMW,cbind(Signature=s,'log2 Fold Change'=as.numeric(tmpmean["young"])-as.numeric(tmpmean["old"]),'Mean in Young'=tmpmean["young"],'Mean in Old'=tmpmean["old"],Pvalue=pvalue))
+}
+
+ttMW=as.data.frame(ttMW)
+ttMW$Pvalue=as.numeric(as.matrix(ttMW$Pvalue))
+ttMW$FDR=p.adjust(ttMW$Pvalue,method="fdr")
+
+ttMW$`log2 Fold Change`=as.numeric(as.matrix(ttMW$`log2 Fold Change`))
+ttMW$`Mean in Young`=as.numeric(as.matrix(ttMW$`Mean in Young`))
+ttMW$`Mean in Old`=as.numeric(as.matrix(ttMW$`Mean in Old`))
+
+ttMW
+```
+
+## Heatmap of common differentially expressed genes in younger versus older cases (Suppl.Fig.5, METABRIC Cohort)
+
+Import list of differentially expressed genes common between TCGA-cohort, Affy-Cohort-A, and Affy-Cohort-B.
+
+```{r}
+comm39.genes <- read.delim(paste0(datapath,"Common39Genes-probesets.txt"),h=T)
+```
+
+Combine a plot-matrix with genes in rows and samples in columns:
+
+```{r}
+plotMat <- mat[rownames(mat) %in% comm39.genes$Gene,]
+type <- clin$type  #type is a character array of age group
+plotMat <- plotMat[,order(clin$AGE_AT_DIAGNOSIS)] # reorder columns by patients age
+type <- type[order(clin$AGE_AT_DIAGNOSIS)]  # reorder columns by patients age
+# scale each gene
+plotMat <- t(scale(t(plotMat)))
+```
+
+Plot matrix as heatmap:
+```{r}
+require("ComplexHeatmap")
+comm.heatmap=Heatmap(as.matrix(plotMat),name = "Exp",
+                  top_annotation = HeatmapAnnotation(Group=type,col=list(Group=c("old"="lightgreen","young"="red"))),
+                  show_row_names=TRUE,
+                  row_names_gp = gpar(fontsize = 8),
+                  show_column_names = FALSE,
+                  cluster_columns = FALSE
+)
+plot(comm.heatmap)
+```
+
+------------------------------------------------------------------------
+
+```{r}
+sessionInfo()
+```
+
+------------------------------------------------------------------------

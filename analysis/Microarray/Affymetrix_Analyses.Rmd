@@ -1,0 +1,669 @@
+---
+title: "Affymetrix-Analyses in Qing et al. 2022, npj Breast Cancer, PMID: 36344517"
+output:
+  html_document:
+    df_print: paged
+---
+
+# Analyses of Affymetrix cohort starting with 2007 samples
+
+## Preparations
+
+Set up libraries and themes:
+
+```{r}
+datapath <- "./data/"
+
+library(data.table)
+library(dplyr)
+library(ggplot2)
+th = theme_bw() + theme(
+  panel.border = element_blank(),
+  panel.grid.major = element_blank(),
+  panel.grid.minor = element_blank(),
+  axis.line = element_line(colour = "black")
+) + theme(
+  legend.position = 'none',
+  axis.text.x = element_text(colour = "black", size = 12),
+  axis.text.y = element_text(
+    colour = "black",
+    size = 12,
+    hjust = 0.95
+  ),
+  axis.ticks = element_blank(),
+  plot.title = element_text(hjust = 0.5, face = "bold"),
+  axis.title = element_text(size = 12, face = "bold")
+) + theme(
+  strip.placement = "outside",
+  plot.title = element_text(hjust = 0.5),
+  strip.text.x = element_text(size = 12),
+  strip.text.y = element_text(angle = 0, size = 10, face = "italic"),
+  panel.spacing = unit(0.1, "lines"),
+  strip.background = element_rect(fill = "#EEEEEE", color = "#FFFFFF")
+)
+```
+
+Load signatures:
+
+```{r}
+signature <- read.delim(paste0(datapath,"signatures.txt"), h=T)
+sig_lists=list()
+for(i in 1:dim(signature)[1]){
+  sig_lists[as.character(signature$Short[i])]=list(as.character(strsplit(as.character(signature$Affymetrix.probesets[i]),split=",")[[1]]))
+}
+```
+
+
+## Import Affymetrix microarray expression data
+
+Import of MAS5 data from table (chip data complete): 22283 Affy probes in rows and 2007 columns with samples (header: combi_id)
+
+```{r}
+cd.compl <- read.delim(paste0(datapath,"n2007_MAS5.txt"),h=T)
+# use first column with Affy IDs as rownames
+rownames(cd.compl) <- cd.compl[,1]
+cd.compl <- cd.compl[,-1]  # then delete first column
+# Import of clinical info as transposed header
+t.header <- read.delim(paste0(datapath,"n2007_SampleInfo.txt"),h=T)
+# Add "X" to rownames of t.header
+rownames(t.header) <- paste("X",t.header$combi_id, sep="")
+n.probes=nrow(cd.compl)
+tdsn=as.numeric(t.header$datas_new09)   # transposed dataset allocation vector, numeric
+tcdm=t(cd.compl)   # transposed chip data matrix
+rm(cd.compl)
+```
+
+## Select most comparable samples from n=2007 breast cancers with MAS5 Affymetrix data
+
+Calculate within each dataset the means of each probeset, the global meand and standard deviation:
+
+```{r}
+ds.mean=by(tcdm, tdsn, colMeans)  # means of each probeset within individual datasets, 
+tcdm.mean=apply(tcdm,2,mean) #   list of 22283 global means
+tcdm.stdev=apply(tcdm,2, sd)   # the same for the StdDev
+```
+
+Calculate the comparability metrics (C) for the datasets (sum of squared differences of dataset-mean from total-mean for all probesets):
+
+```{r}
+n.datas=length(ds.mean)   # number of datasets
+nrm.diff.to.mean= matrix(0,nrow=n.probes,ncol=n.datas) # matrix of NORMALIZED diff from mean
+
+for (probes in 1:n.probes)   # loop for all probesets
+{
+    for (i in 1:n.datas)
+    # calculate for each dataset diff from global-mean of all datasets
+	# normalize by dividing through StdDev
+    # and save in matrix "nrm.diff.to.mean"
+  {
+    nrm.diff.to.mean[probes,i]=(ds.mean[[i]][probes]- tcdm.mean[probes]) / tcdm.stdev[probes]
+  }
+}
+
+# calculate squares of differences
+squ.nrm.diff= nrm.diff.to.mean^2
+# sum of squared differences by column
+sum.squ.nrm.diff=apply(na.omit(squ.nrm.diff),2,sum)
+# summarize results
+comparab=data.frame(sort(unique(tdsn)),sum.squ.nrm.diff)
+names(comparab)=c("dataset","sum.squ.nrm.diff")
+# these vectors are still sorted by numeric dataset tdsn !
+sort.comparab=comparab[order(comparab$sum.squ.nrm.diff),]
+
+# integrate normalized comparab data in sample info in t.header
+for (i in 1:nrow(tcdm)) 
+{t.header$comparab_nrm[i]= comparab$sum.squ.nrm.diff[comparab$dataset==tdsn[i]]}
+# remove temporary variables:
+rm(nrm.diff.to.mean, ds.mean,tcdm.mean, tcdm.stdev, squ.nrm.diff, sum.squ.nrm.diff)
+
+```
+
+# **COHORT-A**
+
+## SELECT "COHORT A" of breast cancer datasets with comparability metric \<5000
+
+```{r}
+# Select a subset of comparab by defining criteria:
+compar.subset= subset(comparab, subset= sum.squ.nrm.diff < 5000)
+# vector of corresponding datasets:
+datas.subset=compar.subset$dataset
+# generate logical vector FALSE/TRUE for the complete dataset of 2007 BC:
+subset.index.vector=(tdsn %in% datas.subset)
+# query selected samples from transposed chipdata matrix and t.header:
+tcdm.find=tcdm[subset.index.vector , ]
+t.header.find= t.header[subset.index.vector,]
+# remove temporary variables:
+rm(compar.subset, datas.subset, subset.index.vector)
+```
+
+## Determine RecurrenceScore of Cohort-A
+
+We apply the oncotypedx function from the genefu package on the finding cohort of 1170 samples:
+
+```{r}
+library(genefu)
+rs.find <- oncotypedx(data= tcdm.find, annot= U133A_Affy_Entrez, do.mapping=FALSE, verbose=TRUE)
+t.header.find <- cbind(t.header.find,rs.find$score)
+```
+
+Exclude those 20% of samples with highest oncotypedx scoring:
+
+```{r}
+# Select a subset of datasets with rs.find$score < 80%-Quantile 
+t.header.find.lowint <- subset(t.header.find, subset= rs.find$score < as.numeric(quantile(rs.find$score, probs=0.8)))
+tcdm.find.lowint <- tcdm.find[rownames(tcdm.find) %in% rownames(t.header.find.lowint),]
+dim(tcdm.find.lowint)
+```
+
+## COHORT-A Compare expression signatures between young and old patients
+
+A label "cohort" is defined which can be used to tag output files
+
+```{r}
+cohort <- "Cohort-A_"
+```
+
+Log2-expression data matrix ==\> mat; Clinical data ==\> clin
+
+```{r}
+clin <- t.header.find.lowint
+clin$Xcombi_id <- rownames(clin)
+mat <- log2(t(tcdm.find.lowint))
+```
+
+## Distribution of ESR1 and MKI67 mRNA expression in ER+/HER2- breast cancers in three cohorts. (Suppl.Fig.1, Cohort-A)
+
+Define three age groups and plot data:
+
+```{r}
+clin$type <- "intermediate"
+clin$type[clin$age>=55] <- "old"
+clin$type[clin$age<=50] <- "young"
+clin$type <- factor(clin$type, levels = c("young", "intermediate", "old"))
+plotdat <- data.frame(mat["205225_at",], clin$type)
+colnames(plotdat) <- c("ESR1_205225_at", "Age_group")
+plotdat$MKI67_mean <- apply(mat[which(rownames(mat)%in%sig_lists$MKI67),],2,mean) 
+```
+
+Plot distribution of ESR1 expression according to age group:
+
+```{r}
+p <- ggplot(plotdat, aes(x = ESR1_205225_at, fill = Age_group, color = Age_group)) +
+  geom_histogram(binwidth=0.2,  alpha=0.5, position="identity")
+plot(p + scale_color_manual(values=c("#E69F00", "black", "#56B4E9"))+
+  scale_fill_manual(values=c("#E69F00", "black", "#56B4E9"))+
+  facet_grid(Age_group ~ .))
+```
+
+Plot distribution of MKI67 expression according to age group:
+
+```{r}
+p <- ggplot(plotdat, aes(x = MKI67_mean, fill = Age_group, color = Age_group)) +
+  geom_histogram(binwidth=0.2,  alpha=0.5, position="identity")
+plot(p + scale_color_manual(values=c("#E69F00", "black", "#56B4E9"))+
+  scale_fill_manual(values=c("#E69F00", "black", "#56B4E9"))+
+  facet_grid(Age_group ~ .))
+```
+
+## Compare young (\<=50yr) vs. old (\>=55) in Cohort-A:
+
+Select sample subgroups (\>=55 yr vs. \<=50 yr):
+
+```{r}
+### Generate "type" as factor age>=55:old or age<=50:young
+clin$type <- NA
+clin$type[clin$age>=55] <- "old"
+clin$type[clin$age<=50] <- "young"
+clin$type <- as.factor(clin$type)
+
+### EXCLUDE SAMPLES with age between 51 and 54 years  (clin$type=NA)
+clin <- clin[!is.na(clin$type),]
+mat <- mat[,colnames(mat) %in% rownames(clin)]
+```
+
+Estimate the expression signatures by taking the average expression of all member genes in a signature for each individual patient.
+
+```{r}
+mat_signature=NULL
+for(sig in names(sig_lists)){
+  score=apply(mat[which(rownames(mat)%in%sig_lists[[sig]]),],2,mean)
+  mat_signature=rbind(mat_signature,score)
+}
+rownames(mat_signature)=names(sig_lists)
+# Add ESR1 as single gene to the mat_signature
+ESR1 <- mat["205225_at",]
+mat_signature <- rbind(mat_signature, ESR1)
+mat_signature_zscore=as.data.frame(cbind(Xcombi_id=colnames(mat_signature),apply(mat_signature,1,function(x)(x-mean(x))/sd(x))))
+finalMat=merge(clin, mat_signature_zscore, by="Xcombi_id")
+```
+
+### Scatter plots for correlation between signatures in Suppl.Fig.4, Cohort-A:
+
+```{r}
+library(psych)
+pairs.panels(finalMat%>%dplyr::select("MKS","TIS","TCell","BCell","DendriticCell","MastCell","ERS","ERS_luminal","ERS_Pos_Symmans","ERS_Neg_Symmans")%>%mutate_all(~as.numeric(as.matrix(.))), 
+             method = "pearson", # correlation method
+             hist.col = "#00AFBB",
+             density = TRUE,  # show density plots
+             ellipses = TRUE, # show correlation ellipses
+             cex=1
+)
+```
+
+### Comparison of signatures in young vs old by Mann-Whitney test (Table 2, Cohort-A)
+
+```{r}
+ttMW=NULL
+for(s in rownames(mat_signature)){
+  submat=finalMat[,c("type",s)]
+  submat[,s]=as.numeric(as.matrix(submat[,s]))
+  
+  pvalue=wilcox.test(submat[submat$type=="young",s],submat[submat$type=="old",s])$p.value
+  tmpmean=tapply(submat[,s],submat$type,mean)
+  ttMW=rbind(ttMW,cbind(Signature=s,'log2 Fold Change'=as.numeric(tmpmean["young"])-as.numeric(tmpmean["old"]),'Mean in Young'=tmpmean["young"],'Mean in Old'=tmpmean["old"],Pvalue=pvalue))
+}
+
+ttMW=as.data.frame(ttMW)
+ttMW$Pvalue=as.numeric(as.matrix(ttMW$Pvalue))
+ttMW$FDR=p.adjust(ttMW$Pvalue,method="fdr")
+
+ttMW$`log2 Fold Change`=as.numeric(as.matrix(ttMW$`log2 Fold Change`))
+ttMW$`Mean in Young`=as.numeric(as.matrix(ttMW$`Mean in Young`))
+ttMW$`Mean in Old`=as.numeric(as.matrix(ttMW$`Mean in Old`))
+
+ttMW
+```
+
+### Violin plots comparing signatures in young vs old (Figure 1, Cohort-A)
+
+```{r}
+for(s in rownames(mat_signature)){
+  submat=finalMat[,c("type",s)]
+  colnames(submat)[2]="Signature"
+  med <- submat %>%
+    group_by(type) %>% 
+    filter(!is.na(type)) %>%
+    summarize(med = median(as.numeric(as.matrix(Signature))))
+  
+  if(ttMW$Pvalue[ttMW$Signature==s]<0.0001){
+    pvalue<-formatC(ttMW$Pvalue[ttMW$Signature==s], format = "e", digits = 2)
+  }else{
+    pvalue=round(ttMW$Pvalue[ttMW$Signature==s],digits=4)
+  }
+  
+  if(ttMW$FDR[ttMW$Signature==s]<0.0001){
+    FDR<-formatC(ttMW$FDR[ttMW$Signature==s], format = "e", digits = 2)
+  }else{
+    FDR=round(ttMW$FDR[ttMW$Signature==s],digits=4)
+  }
+  
+  p=ggplot(submat,
+           aes(x=type,y=as.numeric(as.matrix(Signature)))) + 
+    geom_violin() + 
+    geom_jitter(alpha=.1,width = .1,size=.2)+th+ggtitle(paste0("p value=",pvalue,"\nFDR=",FDR))+xlab("")+ylab(s)+
+    geom_segment(data = med, 
+                 aes(y=med,yend=med,x=as.numeric(type)-.2,
+                     xend=as.numeric(type)+.2),color="red")
+plot(p)
+}
+```
+
+## COHORT-A Limma analysis for identifying differentially expressed genes (Fig.2b, Supp.Tab.S2)
+
+Load required packages:
+
+```{r}
+library(limma)
+# The following block is for Affy probeset annotations 
+options(connectionObserver = NULL) # temporary solution of  bug in the communication between the latest release of the RSQLite package and RStudio 
+library(hgu133a.db)
+library(annotate)
+```
+
+Perform limma analysis for young vs old with Affymetrix source dataset as batch covariate:
+
+```{r}
+type <- clin$type
+batch <- factor(clin$datas_new09...TransBIG.40.)
+# Construct model matrix including both  batch and type
+X <- model.matrix(~batch+type)
+# Use limma to fit gene expression in mat to model matrix
+fit <- lmFit(mat,X)
+# Add Gene Symbols
+fit$genes$probeset <- row.names(fit)
+fit$genes$Symbol <- getSYMBOL(fit$genes$probeset,"hgu133a.db")
+# Empirical Bayes Statistics for Differential Expression
+fit <- eBayes(fit)
+results <- decideTests(fit)
+summary(results)
+volcanoplot(fit, coef="typeyoung", highlight = 15, names=fit$genes$Symbol)
+plotMD(fit, coef="typeyoung", status=results)
+
+nSigGenes <- summary(results)[1,14]  + summary(results)[3,14] 
+deg.cohortA <- topTable(fit, coef = "typeyoung", n=nSigGenes)
+# filter   FC ≥ 1.50 or ≤0.67
+deg.cohortA.fil <- deg.cohortA[ (2^(deg.cohortA$logFC)>=1.5) | (2^(deg.cohortA$logFC)<=1/1.5) ,]
+deg.cohortA.fil
+```
+
+## Heatmap of common differentially expressed genes in younger versus older cases (Suppl.Fig.5, Cohort-A)
+
+Import list of differentially expressed genes common between TCGA-cohort, Affy-Cohort-A, and Affy-Cohort-B.
+
+```{r}
+comm39.genes <- read.delim(paste0(datapath,"Common39Genes-probesets.txt"),h=T)
+comm39.genes <- comm39.genes[order(comm39.genes$probeset),] # order by probeset
+comm.genes.up <- comm39.genes[comm39.genes$Young=="Up",]
+comm.genes.down <- comm39.genes[comm39.genes$Young=="Down",]
+```
+
+Combine a plot-matrix with genes in rows and samples in columns:
+
+```{r}
+plotMat <- mat[rownames(mat) %in% comm39.genes$probeset,]
+stopifnot(rownames(plotMat)==comm39.genes$probeset)
+rownames(plotMat) <- comm39.genes$Gene # add gene names to matrix
+
+type <- clin$type  #type is a character array of age group
+plotMat <- plotMat[,order(clin$age)] # reorder columns by patients age
+type <- type[order(clin$age)]  # reorder columns by patients age
+
+# scale each gene
+plotMat <- t(scale(t(plotMat)))
+```
+
+Plot matrix as heatmap:
+
+```{r}
+require("ComplexHeatmap")
+comm.heatmap=Heatmap(as.matrix(plotMat),name = "Exp",
+                  top_annotation = HeatmapAnnotation(Group=type,col=list(Group=c("old"="lightgreen","young"="red"))),
+                  show_row_names=TRUE,
+                  row_names_gp = gpar(fontsize = 8),
+                  show_column_names = FALSE,
+                  cluster_columns = FALSE
+)
+plot(comm.heatmap)
+```
+
+------------------------------------------------------------------------
+
+# **COHORT-B**
+
+## Re-do analyses with Cohort-B
+
+## SELECT "COHORT B" of breast cancer datasets with comparability metric \>=5000
+
+```{r}
+# Select a subset of comparab by defining criteria:
+compar.subset= subset(comparab, subset= sum.squ.nrm.diff >= 5000)
+# vector of corresponding datasets:
+datas.subset=compar.subset$dataset
+# generate logical vector FALSE/TRUE for the complete dataset of 2007 BC:
+subset.index.vector=(tdsn %in% datas.subset)
+# query selected samples from transposed chipdata matrix and t.header:
+tcdm.valid=tcdm[subset.index.vector , ]
+t.header.valid= t.header[subset.index.vector,]
+# remove temporary variables:
+rm(compar.subset, datas.subset, subset.index.vector)
+```
+
+## Determine RecurrenceScore for Cohort B
+
+We apply the oncotypedx function from the genefu package on the validation cohort of 837 samples:
+
+```{r}
+library(genefu)
+rs.valid <- oncotypedx(data= tcdm.valid, annot= U133A_Affy_Entrez, do.mapping=FALSE, verbose=TRUE)
+t.header.valid <- cbind(t.header.valid,rs.valid$score)
+```
+
+Exclude those 20% of samples with highest oncotypedx scoring:
+
+```{r}
+t.header.valid.lowint <- subset(t.header.valid, subset= rs.valid$score < as.numeric(quantile(rs.valid$score, probs=0.8)))
+tcdm.valid.lowint <- tcdm.valid[rownames(tcdm.valid) %in% rownames(t.header.valid.lowint),]
+dim(tcdm.valid.lowint)
+```
+
+## COHORT-B Compare expression signatures between young and old patients
+
+A label "cohort" is defined which can be used to tag output files
+
+```{r}
+cohort <- "Cohort-B_"
+```
+
+Log2-expression data matrix ==\> mat; Clinical data ==\> clin
+
+```{r}
+clin <- t.header.valid.lowint
+clin$Xcombi_id <- rownames(clin)
+mat <- log2(t(tcdm.valid.lowint))
+```
+
+**Here we repeat for Cohort-B the analysis performed above (on Cohort-A):**
+
+## Distribution of ESR1 and MKI67 mRNA expression in ER+/HER2- breast cancers in three cohorts. (Suppl.Fig.1, Cohort-B)
+
+Define three age groups and plot data:
+
+```{r}
+clin$type <- "intermediate"
+clin$type[clin$age>=55] <- "old"
+clin$type[clin$age<=50] <- "young"
+clin$type <- factor(clin$type, levels = c("young", "intermediate", "old"))
+plotdat <- data.frame(mat["205225_at",], clin$type)
+colnames(plotdat) <- c("ESR1_205225_at", "Age_group")
+plotdat$MKI67_mean <- apply(mat[which(rownames(mat)%in%sig_lists$MKI67),],2,mean) 
+```
+
+Plot distribution of ESR1 expression according to age group:
+
+```{r}
+p <- ggplot(plotdat, aes(x = ESR1_205225_at, fill = Age_group, color = Age_group)) +
+  geom_histogram(binwidth=0.2,  alpha=0.5, position="identity")
+plot(p + scale_color_manual(values=c("#E69F00", "black", "#56B4E9"))+
+  scale_fill_manual(values=c("#E69F00", "black", "#56B4E9"))+
+  facet_grid(Age_group ~ .))
+```
+
+Plot distribution of MKI67 expression according to age group:
+
+```{r}
+p <- ggplot(plotdat, aes(x = MKI67_mean, fill = Age_group, color = Age_group)) +
+  geom_histogram(binwidth=0.2,  alpha=0.5, position="identity")
+plot(p + scale_color_manual(values=c("#E69F00", "black", "#56B4E9"))+
+  scale_fill_manual(values=c("#E69F00", "black", "#56B4E9"))+
+  facet_grid(Age_group ~ .))
+```
+
+## Compare young (\<=50yr) vs. old (\>=55) in Cohort-B:
+
+Select sample subgroups (\>=55 yr vs. \<=50 yr):
+
+```{r}
+### Generate "type" as factor age>=55:old or age<=50:young
+clin$type <- NA
+clin$type[clin$age>=55] <- "old"
+clin$type[clin$age<=50] <- "young"
+clin$type <- as.factor(clin$type)
+
+### EXCLUDE SAMPLES with age between 51 and 54 years  (clin$type=NA)
+clin <- clin[!is.na(clin$type),]
+mat <- mat[,colnames(mat) %in% rownames(clin)]
+```
+
+Estimate the expression signatures by taking the average expression of all member genes in a signature for each individual patient.
+
+```{r}
+mat_signature=NULL
+for(sig in names(sig_lists)){
+  score=apply(mat[which(rownames(mat)%in%sig_lists[[sig]]),],2,mean)
+  mat_signature=rbind(mat_signature,score)
+}
+rownames(mat_signature)=names(sig_lists)
+# Add ESR1 as single gene to the mat_signature
+ESR1 <- mat["205225_at",]
+mat_signature <- rbind(mat_signature, ESR1)
+mat_signature_zscore=as.data.frame(cbind(Xcombi_id=colnames(mat_signature),apply(mat_signature,1,function(x)(x-mean(x))/sd(x))))
+finalMat=merge(clin, mat_signature_zscore, by="Xcombi_id")
+```
+
+### Scatter plots for correlation between signatures in Suppl.Fig.4, Cohort-B:
+
+```{r}
+library(psych)
+pairs.panels(finalMat%>%dplyr::select("MKS","TIS","TCell","BCell","DendriticCell","MastCell","ERS","ERS_luminal","ERS_Pos_Symmans","ERS_Neg_Symmans")%>%mutate_all(~as.numeric(as.matrix(.))), 
+             method = "pearson", # correlation method
+             hist.col = "#00AFBB",
+             density = TRUE,  # show density plots
+             ellipses = TRUE, # show correlation ellipses
+             cex=1
+)
+```
+
+### Comparison of signatures in young vs old by Mann-Whitney test (Table 2, Cohort-B)
+
+```{r}
+ttMW=NULL
+for(s in rownames(mat_signature)){
+  submat=finalMat[,c("type",s)]
+  submat[,s]=as.numeric(as.matrix(submat[,s]))
+  
+  pvalue=wilcox.test(submat[submat$type=="young",s],submat[submat$type=="old",s])$p.value
+  tmpmean=tapply(submat[,s],submat$type,mean)
+  ttMW=rbind(ttMW,cbind(Signature=s,'log2 Fold Change'=as.numeric(tmpmean["young"])-as.numeric(tmpmean["old"]),'Mean in Young'=tmpmean["young"],'Mean in Old'=tmpmean["old"],Pvalue=pvalue))
+}
+
+ttMW=as.data.frame(ttMW)
+ttMW$Pvalue=as.numeric(as.matrix(ttMW$Pvalue))
+ttMW$FDR=p.adjust(ttMW$Pvalue,method="fdr")
+
+ttMW$`log2 Fold Change`=as.numeric(as.matrix(ttMW$`log2 Fold Change`))
+ttMW$`Mean in Young`=as.numeric(as.matrix(ttMW$`Mean in Young`))
+ttMW$`Mean in Old`=as.numeric(as.matrix(ttMW$`Mean in Old`))
+
+ttMW
+```
+
+### Violin plots comparing signatures in young vs old (Figure 1, Cohort-B)
+
+```{r}
+for(s in rownames(mat_signature)){
+  submat=finalMat[,c("type",s)]
+  colnames(submat)[2]="Signature"
+  med <- submat %>%
+    group_by(type) %>% 
+    filter(!is.na(type)) %>%
+    summarize(med = median(as.numeric(as.matrix(Signature))))
+  
+  if(ttMW$Pvalue[ttMW$Signature==s]<0.0001){
+    pvalue<-formatC(ttMW$Pvalue[ttMW$Signature==s], format = "e", digits = 2)
+  }else{
+    pvalue=round(ttMW$Pvalue[ttMW$Signature==s],digits=4)
+  }
+  
+  if(ttMW$FDR[ttMW$Signature==s]<0.0001){
+    FDR<-formatC(ttMW$FDR[ttMW$Signature==s], format = "e", digits = 2)
+  }else{
+    FDR=round(ttMW$FDR[ttMW$Signature==s],digits=4)
+  }
+  
+  p=ggplot(submat,
+           aes(x=type,y=as.numeric(as.matrix(Signature)))) + 
+    geom_violin() + 
+    geom_jitter(alpha=.1,width = .1,size=.2)+th+ggtitle(paste0("p value=",pvalue,"\nFDR=",FDR))+xlab("")+ylab(s)+
+    geom_segment(data = med, 
+                 aes(y=med,yend=med,x=as.numeric(type)-.2,
+                     xend=as.numeric(type)+.2),color="red")
+plot(p)
+}
+```
+
+## COHORT-B Limma analysis for identifying differentially expressed genes (Fig.2c, Supp.Tab.S3)
+
+Load required packages:
+
+```{r}
+library(limma)
+# The following block is for Affy probeset annotations 
+options(connectionObserver = NULL) # temporary solution of  bug in the communication between the latest release of the RSQLite package and RStudio 
+library(hgu133a.db)
+library(annotate)
+```
+
+Perform limma analysis for young vs old with Affymetrix source dataset as batch covariate:
+
+```{r}
+type <- clin$type
+batch <- factor(clin$datas_new09...TransBIG.40.)
+# Construct model matrix including both  batch and type
+X <- model.matrix(~batch+type)
+# Use limma to fit gene expression in mat to model matrix
+fit <- lmFit(mat,X)
+# Add Gene Symbols
+fit$genes$probeset <- row.names(fit)
+fit$genes$Symbol <- getSYMBOL(fit$genes$probeset,"hgu133a.db")
+# Empirical Bayes Statistics for Differential Expression
+fit <- eBayes(fit)
+results <- decideTests(fit)
+summary(results)
+volcanoplot(fit, coef="typeyoung", highlight = 15, names=fit$genes$Symbol)
+plotMD(fit, coef="typeyoung", status=results)
+
+nSigGenes <- summary(results)[1,15]  + summary(results)[3,15] 
+deg.cohortB <- topTable(fit, coef = "typeyoung", n=nSigGenes)
+# filter   FC ≥ 1.50 or ≤0.67
+deg.cohortB.fil <- deg.cohortB[ (2^(deg.cohortB$logFC)>=1.5) | (2^(deg.cohortB$logFC)<=1/1.5) ,]
+deg.cohortB.fil
+```
+
+## Heatmap of differentially expressed genes in younger versus older cases (Suppl.Fig.5, Cohort-B)
+
+Import list of differentially expressed genes common between TCGA-cohort, Affy-Cohort-A, and Affy-Cohort-B.
+
+```{r}
+comm39.genes <- read.delim(paste0(datapath,"Common39Genes-probesets.txt"),h=T)
+comm39.genes <- comm39.genes[order(comm39.genes$probeset),] # order by probeset
+comm.genes.up <- comm39.genes[comm39.genes$Young=="Up",]
+comm.genes.down <- comm39.genes[comm39.genes$Young=="Down",]
+```
+
+Combine a plot-matrix with genes in rows and samples in columns:
+
+```{r}
+
+plotMat <- mat[rownames(mat) %in% comm39.genes$probeset,]
+stopifnot(rownames(plotMat)==comm39.genes$probeset)
+rownames(plotMat) <- comm39.genes$Gene # add gene names to matrix
+
+type <- clin$type  #type is a character array of age group
+plotMat <- plotMat[,order(clin$age)] # reorder columns by patients age
+type <- type[order(clin$age)]  # reorder columns by patients age
+
+# scale each gene
+plotMat <- t(scale(t(plotMat)))
+```
+
+Plot matrix as heatmap:
+
+```{r}
+require("ComplexHeatmap")
+comm.heatmap=Heatmap(as.matrix(plotMat),name = "Exp",
+                  top_annotation = HeatmapAnnotation(Group=type,col=list(Group=c("old"="lightgreen","young"="red"))),
+                  show_row_names=TRUE,
+                  row_names_gp = gpar(fontsize = 8),
+                  show_column_names = FALSE,
+                  cluster_columns = FALSE
+)
+plot(comm.heatmap)
+```
+
+------------------------------------------------------------------------
+
+```{r}
+sessionInfo()
+```
+
+------------------------------------------------------------------------
